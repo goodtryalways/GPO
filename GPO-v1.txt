@@ -1,0 +1,48 @@
+# --- Configuration ---
+$TargetServer = "OldServer01"        # Change to your source server
+$ExportPath   = "C:\GPO_Migration"   # Folder for results
+$Timestamp    = Get-Date -Format "yyyyMMdd_HHmm"
+
+# Prepare Output File
+$ReportFile = Join-Path $ExportPath "$($TargetServer)_FullAudit_$Timestamp.csv"
+if (!(Test-Path $ExportPath)) { New-Item -ItemType Directory -Path $ExportPath | Out-Null }
+
+Write-Host "🔍 Expert Audit Started for: $TargetServer" -ForegroundColor Cyan
+
+try {
+    # Get RSOP Data (Resultant Set of Policy)
+    [xml]$RSOP = Get-GPResultantSetOfPolicy -Computer $TargetServer -ReportType Xml
+    $AppliedGPOs = $RSOP.RSOP.ComputerResults.GPO
+
+    $Results = foreach ($GPO in $AppliedGPOs) {
+        $GpoDetails = Get-GPO -Guid $GPO.GUID
+        
+        # --- Logic: Is Server explicitly in Security Filtering? ---
+        # We check the GPO's security descriptor for the server's DistinguisedName or SamAccountName
+        $SecurityDescriptor = Get-GPPermissions -Guid $GPO.GUID -All
+        $IsServerAdded = "NO"
+        foreach ($Perm in $SecurityDescriptor) {
+            if ($Perm.Trustee.Name -like "*$TargetServer*") {
+                $IsServerAdded = "YES"
+            }
+        }
+
+        # Create Custom Object for CSV
+        [PSCustomObject]@{
+            "ServerName"          = $TargetServer
+            "GPO Name"            = $GPO.Name
+            "Security Filtering"  = $IsServerAdded
+            "GPO Created"         = $GpoDetails.CreationTime
+            "GPO Modified"        = $GpoDetails.ModificationTime
+            "WMI Filter"          = if ($GpoDetails.WmiFilter) { $GpoDetails.WmiFilter.Name } else { "None" }
+            "GPO Status"          = $GpoDetails.GpoStatus # Checks if User/Computer settings are disabled
+            "Linked OU"           = $GPO.Links.LinkTo # Helps you find where to link it on the new server
+        }
+    }
+
+    $Results | Export-Csv -Path $ReportFile -NoTypeInformation
+    Write-Host "✅ Audit Complete! File saved: $ReportFile" -ForegroundColor Green
+}
+catch {
+    Write-Error "Error: $($_.Exception.Message)"
+}
